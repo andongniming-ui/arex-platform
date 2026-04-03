@@ -1,0 +1,28 @@
+{
+  "name": "repeater-platform-frontend",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "vite",
+    "build": "vue-tsc && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "vue": "^3.4.0",
+    "vue-router": "^4.3.0",
+    "pinia": "^2.1.7",
+    "axios": "^1.7.2",
+    "naive-ui": "^2.38.2",
+    "jsondiffpatch": "^0.6.0",
+    "vue-json-pretty": "^2.4.0",
+    "echarts": "^5.5.0",
+    "vue-echarts": "^7.0.3",
+    "@vicons/ionicons5": "^0.12.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^5.0.5",
+    "vite": "^5.3.1",
+    "typescript": "^5.4.5",
+    "vue-tsc": "^2.0.21"
+  }
+}
