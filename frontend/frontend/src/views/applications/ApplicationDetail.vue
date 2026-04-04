@@ -33,9 +33,6 @@
         <n-descriptions-item label="JAR 名称">{{ app.java_jar_name || '-' }}</n-descriptions-item>
         <n-descriptions-item label="JVM PID">{{ app.java_pid || '-' }}</n-descriptions-item>
         <n-descriptions-item label="应用端口">{{ app.repeater_port }}</n-descriptions-item>
-        <n-descriptions-item label="Sandbox 端口">{{ app.sandbox_port }}</n-descriptions-item>
-        <n-descriptions-item label="Sandbox 路径" :span="2">{{ app.sandbox_home }}</n-descriptions-item>
-        <n-descriptions-item label="录制数据目录" :span="2">{{ app.repeater_data_dir }}</n-descriptions-item>
         <n-descriptions-item label="最后心跳">{{ fmtTime(app.last_heartbeat) || '-' }}</n-descriptions-item>
       </n-descriptions>
     </n-card>
@@ -173,18 +170,6 @@
       </n-form-item>
       <n-form-item label="应用端口">
         <n-input-number v-model:value="editForm.repeater_port" />
-      </n-form-item>
-      <n-form-item label="Sandbox 端口">
-        <n-input-number v-model:value="editForm.sandbox_port" :min="1024" :max="65535" />
-        <template #feedback>
-          <span style="color:#999;font-size:12px">每个应用必须唯一，避免端口冲突</span>
-        </template>
-      </n-form-item>
-      <n-form-item label="Sandbox 路径">
-        <n-input v-model:value="editForm.sandbox_home" placeholder="/home/test/.sandbox" />
-      </n-form-item>
-      <n-form-item label="录制数据目录">
-        <n-input v-model:value="editForm.repeater_data_dir" placeholder="/home/test/.sandbox-module/repeater-data/record" />
       </n-form-item>
     </n-form>
     <template #action>
@@ -367,9 +352,6 @@ const editForm = ref({
   ssh_password: '',
   java_jar_name: '',
   repeater_port: 8080,
-  sandbox_port: 39393,
-  sandbox_home: '',
-  repeater_data_dir: '',
 })
 
 function openEdit() {
@@ -381,10 +363,7 @@ function openEdit() {
     ssh_key_path: app.value.ssh_key_path || '',
     ssh_password: app.value.ssh_password || '',
     java_jar_name: app.value.java_jar_name || '',
-    repeater_port: app.value.repeater_port ?? 9001,
-    sandbox_port: app.value.sandbox_port ?? 39393,
-    sandbox_home: app.value.sandbox_home || '/home/test/.sandbox',
-    repeater_data_dir: app.value.repeater_data_dir || '/home/test/.sandbox-module/repeater-data/record',
+    repeater_port: app.value.repeater_port ?? 8080,
   }
   showEdit.value = true
 }

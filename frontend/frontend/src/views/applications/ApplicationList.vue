@@ -56,15 +56,6 @@
       <n-form-item label="应用端口">
         <n-input-number v-model:value="form.repeater_port" />
       </n-form-item>
-      <n-form-item label="Sandbox 端口">
-        <n-input-number v-model:value="form.sandbox_port" :min="1024" :max="65535" />
-        <template #feedback>
-          <span style="color:#999;font-size:12px">每个应用必须唯一，避免端口冲突</span>
-        </template>
-      </n-form-item>
-      <n-form-item label="Sandbox 路径">
-        <n-input v-model:value="form.sandbox_home" placeholder="/home/test/.sandbox" />
-      </n-form-item>
     </n-form>
     <template #action>
       <n-button @click="showForm = false">取消</n-button>
@@ -137,8 +128,6 @@ const emptyForm = () => ({
   ssh_password: '',
   java_jar_name: '',
   repeater_port: 8080,
-  sandbox_port: 39393,
-  sandbox_home: '/home/test/.sandbox',
 })
 
 const form = ref(emptyForm())
@@ -188,9 +177,7 @@ function openEdit(row: Application) {
     ssh_key_path: row.ssh_key_path || '',
     ssh_password: row.ssh_password || '',
     java_jar_name: row.java_jar_name || '',
-    repeater_port: row.repeater_port ?? 9001,
-    sandbox_port: row.sandbox_port ?? 39393,
-    sandbox_home: row.sandbox_home || '/home/test/.sandbox',
+    repeater_port: row.repeater_port ?? 8080,
   }
   showForm.value = true
 }
