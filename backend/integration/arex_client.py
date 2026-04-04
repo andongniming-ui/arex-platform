@@ -4,7 +4,6 @@ Replaces repeater_client.py — no Hessian, no SFTP, pure async HTTP.
 """
 import httpx
 from datetime import datetime
-from typing import Optional
 
 
 class ArexClientError(Exception):
