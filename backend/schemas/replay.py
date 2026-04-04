@@ -83,6 +83,7 @@ class ReplayResultOut(BaseModel):
     recording_path: str | None = None
     recording_entry_type: str | None = None
     recording_service_id: str | None = None
+    recording_request_body: str | None = None
 
     model_config = {"from_attributes": True}
 

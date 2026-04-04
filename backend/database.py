@@ -29,6 +29,13 @@ async def get_db() -> AsyncSession:
 
 
 async def init_db():
+    # Ensure all models are imported so Base.metadata knows about every table
+    import models.application  # noqa: F401
+    import models.recording    # noqa: F401
+    import models.replay       # noqa: F401
+    import models.schedule     # noqa: F401
+    import models.suite        # noqa: F401
+    import models.compare      # noqa: F401
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
         # Add new columns to existing tables without a full migration framework.
@@ -69,14 +76,15 @@ async def init_db():
             # XML request template for auto-fill on replay
             ("application", "xml_request_template", "TEXT"),
         ]
+        import sqlalchemy as _sa
+        is_pg = "postgresql" in str(settings.db_url)
         for table, col, col_type in new_columns:
             try:
-                await conn.execute(
-                    __import__("sqlalchemy").text(
-                        f"ALTER TABLE {table} ADD COLUMN {col} {col_type}"
-                    )
-                )
+                if is_pg:
+                    sql = f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {col} {col_type}"
+                else:
+                    sql = f"ALTER TABLE {table} ADD COLUMN {col} {col_type}"
+                await conn.execute(_sa.text(sql))
             except Exception as e:
-                # Log only in debug mode, as column existence is expected
                 logger.debug(f"Column {table}.{col} may already exist: {e}")
 

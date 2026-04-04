@@ -148,7 +148,11 @@
     </n-modal>
 
     <!-- Diff modal -->
-    <n-modal v-model:show="showDiff" preset="card" style="width: 860px" title="响应对比">
+    <n-modal v-model:show="showDiff" preset="card" style="width: 900px" title="响应对比">
+      <!-- 请求体 -->
+      <n-card title="请求体" size="small" style="margin-bottom: 12px" v-if="selectedResult?.recording_request_body">
+        <pre style="font-size: 12px; overflow: auto; max-height: 160px; background: #f8f8f8; padding: 8px; border-radius: 4px; margin: 0">{{ selectedResult.recording_request_body }}</pre>
+      </n-card>
       <n-grid :cols="2" :x-gap="16">
         <n-gi>
           <n-card title="原始响应" size="small">

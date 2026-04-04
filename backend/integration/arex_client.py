@@ -40,16 +40,29 @@ class ArexClient:
             "endTime": self._to_epoch_ms(end_time),
             "pageSize": page_size,
             "pageIndex": page_index,
+            # arex-storage 0.6.x requires 'category' for Servlet entry recordings
+            "category": {"name": "Servlet", "entryPoint": True, "skipComparison": False},
         }
         return await self._post("/api/storage/replay/query/replayCase", body)
 
     async def view_recording(self, record_id: str) -> dict:
         """
-        Get details of a single recording including sub-invocations.
-        GET /api/storage/replay/query/viewRecord/{record_id}
-        Returns full JSON response dict.
+        Get full details of a recording including targetResponse.
+        arex-storage 0.6.x: POST /api/storage/replay/query/viewRecord with {"recordId": ...}
+        Returns the first Servlet entry in recordResult, or the full response dict.
         """
-        return await self._get(f"/api/storage/replay/query/viewRecord/{record_id}")
+        resp = await self._post(
+            "/api/storage/replay/query/viewRecord",
+            {"recordId": record_id},
+        )
+        # arex-storage 0.6.x returns {"recordResult": [...], "desensitized": false}
+        results = resp.get("recordResult") or []
+        # Return the Servlet entry point record (entryPoint=true) if available
+        for r in results:
+            ct = r.get("categoryType", {})
+            if isinstance(ct, dict) and ct.get("entryPoint"):
+                return r
+        return results[0] if results else {}
 
     async def count_recordings(
         self,
@@ -66,9 +79,13 @@ class ArexClient:
             "appId": app_id,
             "beginTime": self._to_epoch_ms(begin_time),
             "endTime": self._to_epoch_ms(end_time),
+            "category": {"name": "Servlet", "entryPoint": True, "skipComparison": False},
         }
         resp = await self._post("/api/storage/replay/query/countByRange", body)
-        # Try common response shapes: {"body": {"count": N}} or {"body": N}
+        # arex-storage 0.6.x: {"count": N} at top level
+        if "count" in resp:
+            return int(resp["count"])
+        # Fallback for older shape: {"body": {"count": N}} or {"body": N}
         body_val = resp.get("body", {})
         if isinstance(body_val, dict):
             return int(body_val.get("count", 0))

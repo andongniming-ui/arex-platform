@@ -247,19 +247,39 @@ async def _collect_recordings(session_id: str):
             )
 
             # Parse AREXMocker JSON list into Recording objects
-            # arex-storage response shape: {"body": {"sources": [...], "total": N}}
-            # Each source is an AREXMocker with fields: recordId, categoryType, operationName,
-            # targetRequest (JSON), targetResponse (JSON), createTime (epoch ms)
+            # arex-storage 0.6.x response shape: {"records": [...], "desensitized": false}
+            # (not wrapped in "body" — records are at top level)
             sources = []
-            body_val = resp.get("body", {})
-            if isinstance(body_val, dict):
-                sources = body_val.get("sources", []) or body_val.get("recordList", []) or []
-            elif isinstance(body_val, list):
-                sources = body_val
+            # Try top-level "records" field first (arex-storage 0.6.x)
+            if "records" in resp:
+                sources = resp.get("records") or []
+            else:
+                body_val = resp.get("body", {})
+                if isinstance(body_val, dict):
+                    sources = body_val.get("sources", []) or body_val.get("recordList", []) or []
+                elif isinstance(body_val, list):
+                    sources = body_val
 
             desensitize_rules = getattr(app, "desensitize_rules", None) or []
 
-            for mocker in sources:
+            # arex-storage 0.6.x replayCase list query does NOT return targetResponse.
+            # Must call viewRecord for each recording to get the full data.
+            full_mockers = []
+            for summary in sources:
+                record_id = summary.get("id") or summary.get("recordId")
+                if record_id:
+                    try:
+                        full = await asyncio.wait_for(
+                            arex_client.view_recording(record_id),
+                            timeout=15.0,
+                        )
+                        full_mockers.append(full if full else summary)
+                    except Exception:
+                        full_mockers.append(summary)
+                else:
+                    full_mockers.append(summary)
+
+            for mocker in full_mockers:
                 # Map AREXMocker fields to Recording model
                 category = mocker.get("categoryType", {})
                 if isinstance(category, dict):
@@ -279,17 +299,45 @@ async def _collect_recordings(session_id: str):
                 target_req = mocker.get("targetRequest") or {}
                 target_resp = mocker.get("targetResponse") or {}
 
-                # Store as JSON strings
-                request_body = _json.dumps(target_req) if isinstance(target_req, dict) else str(target_req)
-                response_body = _json.dumps(target_resp) if isinstance(target_resp, dict) else str(target_resp)
+                # Extract body from arex-storage 0.6.x wrapper: {"body": ..., "attributes": ..., "type": ...}
+                # targetRequest.body is base64-encoded; attributes contains HttpMethod/RequestPath/Headers
+                # targetResponse.body is a raw string (XML, JSON, plain text, etc.)
+                import base64 as _b64
+                import json as _json
+                if isinstance(target_req, dict):
+                    attrs = target_req.get("attributes") or {}
+                    req_body_raw = target_req.get("body") or ""
+                    if isinstance(req_body_raw, str) and req_body_raw:
+                        try:
+                            req_body_raw = _b64.b64decode(req_body_raw).decode("utf-8", errors="replace")
+                        except Exception:
+                            pass  # keep as-is if not valid base64
+                    http_method = (attrs.get("HttpMethod") or "POST").upper()
+                    req_path = attrs.get("RequestPath") or "/"
+                    hdrs = attrs.get("Headers") or {}
+                    content_type = hdrs.get("content-type") or hdrs.get("Content-Type")
+                    request_body = _json.dumps({
+                        "method": http_method,
+                        "uri": req_path,
+                        "body": req_body_raw,
+                        "contentType": content_type,
+                    }, ensure_ascii=False)
+                else:
+                    request_body = str(target_req)
+
+                if isinstance(target_resp, dict):
+                    resp_body_raw = target_resp.get("body") or ""
+                    response_body = str(resp_body_raw)
+                else:
+                    response_body = str(target_resp) if target_resp else ""
 
                 # Apply desensitization
                 if desensitize_rules:
                     request_body = desensitize_body(request_body, desensitize_rules)
                     response_body = desensitize_body(response_body, desensitize_rules)
 
-                # Parse timestamp
-                create_time_ms = mocker.get("createTime") or 0
+                # Parse timestamp — arex-storage 0.6.x uses "creationTime", older uses "createTime"
+                create_time_ms = mocker.get("creationTime") or mocker.get("createTime") or 0
                 if create_time_ms:
                     ts = datetime.utcfromtimestamp(create_time_ms / 1000)
                 else:
@@ -299,7 +347,8 @@ async def _collect_recordings(session_id: str):
                     id=str(uuid.uuid4()),
                     session_id=session_id,
                     app_id=s.app_id,
-                    trace_id=mocker.get("recordId", str(uuid.uuid4())),
+                    # arex-storage 0.6.x uses "id" field as record identifier
+                    trace_id=mocker.get("id") or mocker.get("recordId") or str(uuid.uuid4()),
                     entry_type=entry_type,
                     entry_app=app.name,
                     host=app.ssh_host,

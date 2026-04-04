@@ -328,6 +328,7 @@ async def list_results(
             except Exception:
                 pass
         d.recording_service_id = _extract_service_id(raw_xml) or _extract_service_id(resp_body)
+        d.recording_request_body = raw_xml
         out.append(d)
     return {"items": out, "total": total}
 

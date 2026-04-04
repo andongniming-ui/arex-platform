@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 from config import settings
 from database import init_db, async_session_factory
 from api.v1 import applications, sessions, test_cases, replays, ci
+from api.arex_proxy import router as arex_proxy_router
 from api.v1 import schedule as schedule_api
 from api.v1 import stats as stats_api
 from api.v1 import suites as suites_api
@@ -84,6 +85,7 @@ app.add_middleware(
 
 
 # Routers
+app.include_router(arex_proxy_router)   # arex-agent compat proxy (no prefix)
 app.include_router(applications.router, prefix="/api/v1")
 app.include_router(sessions.router, prefix="/api/v1")
 app.include_router(test_cases.router, prefix="/api/v1")

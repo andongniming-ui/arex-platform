@@ -64,7 +64,7 @@ import { useRouter } from 'vue-router'
 import {
   NCard, NSpace, NDataTable, NTag, NButton, NInput, NSelect, NPopconfirm, useMessage, useDialog,
 } from 'naive-ui'
-import { replayApi, type ReplayJob } from '@/api/replays'
+import { replayApi, type ReplayJob, type ReplayJobCreate } from '@/api/replays'
 import { fmtTime } from '@/utils/time'
 import { testCaseApi } from '@/api/testCases'
 import { applicationApi } from '@/api/applications'
@@ -82,6 +82,7 @@ const jobsLoading = ref(false)
 const jobTotal = ref(0)
 const selectedIds = ref<string[]>([])
 const batchDeleting = ref(false)
+const replayingIds = ref<Set<string>>(new Set())
 
 // 回放历史筛选
 const filterKeyword = ref('')
@@ -170,13 +171,20 @@ const jobColumns = [
   {
     title: '操作',
     key: 'actions',
-    width: 160,
+    width: 240,
     render: (r: ReplayJob) =>
       h(NSpace, { size: 'small' }, () => [
         h(NButton, {
           size: 'small',
           onClick: () => router.push(`/results/${r.id}`),
         }, () => '查看结果'),
+        h(NButton, {
+          size: 'small',
+          type: 'primary',
+          ghost: true,
+          loading: replayingIds.value.has(r.id),
+          onClick: () => reReplay(r),
+        }, () => '重新回放'),
         h(NPopconfirm, { onPositiveClick: () => deleteJob(r.id) }, {
           trigger: () => h(NButton, { size: 'small', type: 'error' }, () => '删除'),
           default: () => '确认删除该回放记录？',
@@ -218,6 +226,40 @@ async function loadJobs() {
     jobPagination.itemCount = jobTotal.value
   } finally {
     jobsLoading.value = false
+  }
+}
+
+async function reReplay(r: ReplayJob) {
+  replayingIds.value = new Set([...replayingIds.value, r.id])
+  try {
+    const payload: ReplayJobCreate = {
+      case_id: r.case_id,
+      target_app_id: r.target_app_id,
+      environment: r.environment,
+      concurrency: r.concurrency,
+      delay_ms: r.delay_ms,
+      override_host: r.override_host,
+      ignore_fields: r.ignore_fields,
+      diff_rules: r.diff_rules,
+      assertions: r.assertions,
+      perf_threshold_ms: r.perf_threshold_ms,
+      use_sub_invocation_mocks: r.use_sub_invocation_mocks,
+      webhook_url: r.webhook_url,
+      notify_type: r.notify_type,
+      smart_noise_reduction: r.smart_noise_reduction,
+      repeat_count: r.repeat_count,
+      header_transforms: r.header_transforms,
+      retry_count: r.retry_count,
+    }
+    const res = await replayApi.create(payload)
+    message.success('已创建新回放任务')
+    router.push(`/results/${res.data.id}`)
+  } catch {
+    message.error('创建回放任务失败')
+  } finally {
+    const s = new Set(replayingIds.value)
+    s.delete(r.id)
+    replayingIds.value = s
   }
 }
 

@@ -105,6 +105,7 @@ export interface ReplayResult {
   recording_path?: string
   recording_entry_type?: string
   recording_service_id?: string
+  recording_request_body?: string
 }
 
 export type FailureCategory = 'ENVIRONMENT' | 'DATA_ISSUE' | 'BUG' | 'PERFORMANCE' | 'UNKNOWN'
