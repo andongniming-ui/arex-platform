@@ -23,6 +23,9 @@ services:
     volumes:
       - ./frontend/frontend:/app
     working_dir: /app
+    environment:
+      - VITE_API_TARGET=http://backend:8000
+      - VITE_WS_TARGET=ws://backend:8000
     command: sh -c "npm install && npm run dev -- --host"
 
   mongodb:

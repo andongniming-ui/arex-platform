@@ -27,12 +27,12 @@ class TestSecurityDefects:
         assert response.headers["access-control-allow-origin"] == "*"
 
     def test_default_secret_key(self):
-        """缺陷2: secret_key 默认为空字符串，生产环境应通过 RP_SECRET_KEY 覆盖"""
+        """缺陷2: secret_key 默认为弱字符串，生产环境应通过 AP_SECRET_KEY 覆盖"""
         from config import settings
 
-        # 缺陷：默认为空字符串，没有强制要求设置，不应在生产中使用
-        assert settings.secret_key == "", (
-            "secret_key should default to '' — set RP_SECRET_KEY in production"
+        # 缺陷：默认为 "changeme"，没有强制要求设置强密钥，不应在生产中使用
+        assert settings.secret_key == "changeme", (
+            "secret_key should default to 'changeme' — set AP_SECRET_KEY in production"
         )
 
     def test_no_api_authentication(self):
