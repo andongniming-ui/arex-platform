@@ -11,7 +11,10 @@ from models.application import Application
 from models.recording import RecordingSession, Recording, RepeaterConfig
 from models.test_case import TestCaseRecording
 from schemas.recording import SessionCreate, SessionOut, RecordingOut, RepeaterConfigCreate, RepeaterConfigOut
-from integration import ssh_executor, config_manager, data_parser
+from integration import ssh_executor
+from integration.config_manager import build_arex_conf, get_default_conf_preview, parse_arex_storage_url
+from integration.arex_client import ArexClient, ArexClientError
+from config import settings
 from utils.desensitize import desensitize_body
 
 router = APIRouter(tags=["sessions & recordings"])
@@ -47,14 +50,6 @@ async def upsert_config(
     import json as _json
     app = await _get_app_with_config(app_id, db)
 
-    # Validate config_json is non-empty valid JSON with required fields
-    try:
-        parsed = _json.loads(body.config_json)
-    except Exception:
-        raise HTTPException(400, "config_json is not valid JSON")
-    if not isinstance(parsed, dict) or not parsed.get("pluginIdentities"):
-        raise HTTPException(400, "config_json must include pluginIdentities")
-
     if app.repeater_config:
         cfg = app.repeater_config
         for field, value in body.model_dump().items():
@@ -73,7 +68,14 @@ async def push_config(app_id: str, db: AsyncSession = Depends(get_db)):
     app = await _get_app_with_config(app_id, db)
     if not app.repeater_config:
         raise HTTPException(400, "No config to push; create config first")
-    await config_manager.push_config(app, app.repeater_config)
+    # Build arex.agent.conf and push to target server
+    arex_storage_url = settings.arex_storage_url
+    host, port = parse_arex_storage_url(arex_storage_url)
+    conf_content = build_arex_conf(app, host, port)
+    remote_conf_path = "~/arex-agent/arex.agent.conf"
+    await asyncio.to_thread(
+        ssh_executor.push_content, app, conf_content, remote_conf_path
+    )
     app.repeater_config.pushed_at = datetime.utcnow()
     await db.commit()
     return {"pushed": True, "pushed_at": app.repeater_config.pushed_at.isoformat()}
@@ -81,8 +83,7 @@ async def push_config(app_id: str, db: AsyncSession = Depends(get_db)):
 
 @router.get("/configs/{app_id}/default", response_model=dict)
 async def get_default_config(app_id: str):
-    import json
-    return {"config": json.loads(config_manager.get_default_config_json())}
+    return {"config": get_default_conf_preview()}
 
 
 # ── Sessions ──────────────────────────────────────────────────────────────────
@@ -90,16 +91,6 @@ async def get_default_config(app_id: str):
 @router.post("/sessions", response_model=SessionOut, status_code=201)
 async def create_session(body: SessionCreate, db: AsyncSession = Depends(get_db)):
     app = await _get_app_with_config(body.app_id, db)
-
-    # Clear remote recording directory so old files don't contaminate this session
-    try:
-        deleted = await asyncio.to_thread(
-            ssh_executor.clear_remote_dir, app, app.repeater_data_dir
-        )
-        if deleted:
-            print(f"[session] Cleared {deleted} old file(s) from {app.repeater_data_dir}")
-    except Exception as e:
-        print(f"[session] Warning: could not clear remote recording dir: {e}")
 
     # Snapshot current config
     config_snapshot = app.repeater_config.config_json if app.repeater_config else None
@@ -217,9 +208,9 @@ async def stop_session(
 
 
 async def _collect_recordings(session_id: str):
-    """Background task: SFTP-pull recording files and store in DB."""
-    import random
+    """Background task: query arex-storage API and store recordings in DB."""
     from database import async_session_factory
+    from datetime import timezone as _tz
 
     async with async_session_factory() as db:
         s = await db.get(RecordingSession, session_id)
@@ -230,106 +221,89 @@ async def _collect_recordings(session_id: str):
             return
         count = 0
         try:
-            # Only collect files created after the session started (avoids mixing other apps' data)
-            from datetime import timezone as _tz
-            since_ts = s.started_at.replace(tzinfo=_tz.utc).timestamp()
-            files = await asyncio.wait_for(
-                asyncio.to_thread(
-                    ssh_executor.list_remote_files, app, app.repeater_data_dir, since_ts
+            arex_client = ArexClient(settings.arex_storage_url)
+            begin_time = s.started_at
+            end_time = s.stopped_at or datetime.utcnow()
+
+            # Query recordings from arex-storage
+            resp = await asyncio.wait_for(
+                arex_client.query_recordings(
+                    app_id=app.name,
+                    begin_time=begin_time,
+                    end_time=end_time,
+                    page_size=200,
                 ),
-                timeout=120.0,
+                timeout=60.0,
             )
-            expected_port_suffix = f":{app.repeater_port}" if app.repeater_port else None
-            session_start = s.started_at
-            session_stop = s.stopped_at
-            sample_rate = getattr(app, "sample_rate", 1.0) or 1.0
+
+            # Parse AREXMocker JSON list into Recording objects
+            # arex-storage response shape: {"body": {"sources": [...], "total": N}}
+            # Each source is an AREXMocker with fields: recordId, categoryType, operationName,
+            # targetRequest (JSON), targetResponse (JSON), createTime (epoch ms)
+            sources = []
+            body_val = resp.get("body", {})
+            if isinstance(body_val, dict):
+                sources = body_val.get("sources", []) or body_val.get("recordList", []) or []
+            elif isinstance(body_val, list):
+                sources = body_val
+
             desensitize_rules = getattr(app, "desensitize_rules", None) or []
-            # Collect all candidate recordings first, then deduplicate before inserting.
-            # When JVM-Sandbox agent and RecordingFilter both run, they both write a file
-            # per request — one with an empty body (agent) and one with the real body (filter).
-            # Deduplication keeps only the best recording per (path, 5-second bucket).
-            all_candidates: list[tuple[str, dict]] = []  # (fname, rec_data)
-            processed_fnames: set[str] = set()
 
-            for fname in files:
-                remote_path = f"{app.repeater_data_dir}/{fname}"
-                content = await asyncio.wait_for(
-                    asyncio.to_thread(
-                        ssh_executor.pull_file_content, app, remote_path
-                    ),
-                    timeout=60.0,
+            for mocker in sources:
+                # Map AREXMocker fields to Recording model
+                category = mocker.get("categoryType", {})
+                if isinstance(category, dict):
+                    entry_type = category.get("name", "HTTP").upper()
+                else:
+                    entry_type = str(category).upper() if category else "HTTP"
+
+                # Map AREX category names to our internal types
+                category_map = {
+                    "HTTPSERVLETMOCKER": "HTTP",
+                    "HTTPCLIENT": "HTTP",
+                    "DUBBO_PROVIDER": "DUBBO",
+                    "MYBATIS": "MYBATIS",
+                }
+                entry_type = category_map.get(entry_type, entry_type)
+
+                target_req = mocker.get("targetRequest") or {}
+                target_resp = mocker.get("targetResponse") or {}
+
+                # Store as JSON strings
+                import json as _json
+                request_body = _json.dumps(target_req) if isinstance(target_req, dict) else str(target_req)
+                response_body = _json.dumps(target_resp) if isinstance(target_resp, dict) else str(target_resp)
+
+                # Apply desensitization
+                if desensitize_rules:
+                    from utils.desensitize import desensitize_body
+                    request_body = desensitize_body(request_body, desensitize_rules)
+                    response_body = desensitize_body(response_body, desensitize_rules)
+
+                # Parse timestamp
+                create_time_ms = mocker.get("createTime") or 0
+                if create_time_ms:
+                    ts = datetime.utcfromtimestamp(create_time_ms / 1000)
+                else:
+                    ts = datetime.utcnow()
+
+                rec = Recording(
+                    id=str(uuid.uuid4()),
+                    session_id=session_id,
+                    app_id=s.app_id,
+                    trace_id=mocker.get("recordId", str(uuid.uuid4())),
+                    entry_type=entry_type,
+                    entry_app=app.name,
+                    host=app.ssh_host,
+                    path=mocker.get("operationName") or "/",
+                    request_body=request_body,
+                    response_body=response_body,
+                    timestamp=ts,
+                    status="RAW",
                 )
-                parsed = data_parser.parse_recording_file(content, session_id, s.app_id)
-                file_accepted = False
-                for rec_data in parsed:
-                    # Filter 1: host port must match this app
-                    if expected_port_suffix:
-                        rec_host = rec_data.get("host") or ""
-                        if rec_host and rec_host != "unknown" and expected_port_suffix not in rec_host:
-                            continue
-                    # Filter 2: internal timestamp must fall within session window
-                    rec_ts = rec_data.get("timestamp")
-                    if rec_ts and session_start:
-                        if rec_ts < session_start:
-                            continue
-                        if session_stop and rec_ts > session_stop:
-                            continue
-                    # Filter 3: sampling rate
-                    if sample_rate < 1.0 and random.random() > sample_rate:
-                        continue
-                    # Apply desensitization to request and response bodies
-                    if desensitize_rules:
-                        if rec_data.get("request_body"):
-                            rec_data["request_body"] = desensitize_body(
-                                rec_data["request_body"], desensitize_rules
-                            )
-                        if rec_data.get("response_body"):
-                            rec_data["response_body"] = desensitize_body(
-                                rec_data["response_body"], desensitize_rules
-                            )
-                    all_candidates.append((fname, rec_data))
-                    file_accepted = True
-                if file_accepted:
-                    processed_fnames.add(fname)
-
-            # Deduplicate: when JVM-Sandbox agent and RecordingFilter both run, both write
-            # a file per request. The sandbox recording has an empty body; the filter
-            # recording has the real body. They arrive within ~2 seconds of each other.
-            # For each empty-body recording that has a nearby with-body recording (≤2s),
-            # discard the empty-body one.
-            def _has_body(rd: dict) -> bool:
-                return '"body"' in (rd.get("request_body") or "")
-
-            discarded: set[int] = set()
-            without_body_idxs = [i for i, (_, rd) in enumerate(all_candidates) if not _has_body(rd)]
-            with_body_idxs    = [i for i, (_, rd) in enumerate(all_candidates) if _has_body(rd)]
-
-            for wb_i in without_body_idxs:
-                wb_ts = all_candidates[wb_i][1].get("timestamp")
-                if not wb_ts:
-                    continue
-                for b_i in with_body_idxs:
-                    b_ts = all_candidates[b_i][1].get("timestamp")
-                    if b_ts and abs((b_ts - wb_ts).total_seconds()) <= 2.0:
-                        discarded.add(wb_i)
-                        break
-
-            for idx, (_, rec_data) in enumerate(all_candidates):
-                if idx in discarded:
-                    continue
-                rec = Recording(id=str(uuid.uuid4()), **rec_data)
                 db.add(rec)
                 count += 1
 
-            # Delete all processed remote files (including discarded duplicates)
-            for fname in processed_fnames:
-                remote_path = f"{app.repeater_data_dir}/{fname}"
-                try:
-                    await asyncio.to_thread(
-                        ssh_executor.delete_remote_file, app, remote_path
-                    )
-                except Exception:
-                    pass
             s.record_count = count
             s.status = "DONE"
         except Exception as e:
