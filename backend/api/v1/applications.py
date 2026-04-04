@@ -7,7 +7,8 @@ from database import get_db
 from models.application import Application
 from schemas.application import ApplicationCreate, ApplicationUpdate, ApplicationOut, SSHTestResult
 from integration import ssh_executor
-from integration import repeater_client
+from integration.arex_client import ArexClient
+from config import settings
 import uuid
 from datetime import datetime
 
@@ -227,9 +228,10 @@ async def agent_status(app_id: str, db: AsyncSession = Depends(get_db)):
     app = await db.get(Application, app_id)
     if not app:
         raise HTTPException(404, "Application not found")
-    result = await repeater_client.check_agent_status(app)
-    if result.get("alive"):
+    arex = ArexClient(settings.arex_storage_url)
+    alive = await arex.health_check()
+    if alive:
         app.agent_status = "ATTACHED"
         app.last_heartbeat = datetime.utcnow()
         await db.commit()
-    return {"alive": result.get("alive"), "agent_status": app.agent_status}
+    return {"alive": alive, "agent_status": app.agent_status}
