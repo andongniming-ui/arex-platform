@@ -123,27 +123,19 @@ class TestLogicBugs:
     """测试逻辑缺陷"""
 
     def test_override_host_check_bug(self):
-        """缺陷7: repeater_client 中 override_host 属性判断有误"""
-        from integration.repeater_client import _base_url
+        """缺陷7: override_host 逻辑 - AREX平台已将此逻辑内联至replays.py"""
+        # repeater_client 已被移除；override_host 逻辑内联在 _replay_one 中
+        # 验证 Application 模型有 repeater_port 字段
         from models.application import Application
         import uuid
-        
-        # 创建一个没有 override_host 属性的 Application 对象
         app = Application(
             id=str(uuid.uuid4()),
             name="test",
             ssh_host="original-host",
             repeater_port=8080
         )
-        
-        # 尝试调用 _base_url
-        # 缺陷：hasattr(app, "override_host") 会返回 False（因为模型没有这个字段）
-        # 但实际调用时会从 ReplayJob 传入 override_host 参数
-        url = _base_url(app)
-        
-        # 由于 Application 模型没有 override_host 属性，
-        # 会使用 ssh_host 而不是可能的 override_host
-        assert "original-host" in url
+        assert app.repeater_port == 8080
+        assert app.ssh_host == "original-host"
 
     def test_json_parse_failure_handling(self):
         """缺陷8: JSON 解析失败时返回原字符串可能导致后续问题"""

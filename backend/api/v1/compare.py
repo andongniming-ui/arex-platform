@@ -146,8 +146,8 @@ async def list_compare_results(
 # ── Background worker ─────────────────────────────────────────────────────────
 
 async def _run_compare(run_id: str, req: CompareRequest):
+    import httpx
     from database import async_session_factory
-    from integration import repeater_client
 
     try:
         async with async_session_factory() as db:
@@ -214,16 +214,26 @@ async def _run_compare(run_id: str, req: CompareRequest):
                 else:
                     replay_path = recording.path or "/"
 
+                async def _http_replay(app, path, method, headers, body):
+                    host = f"http://{app.ssh_host}:{app.repeater_port}"
+                    url = host + path
+                    try:
+                        async with httpx.AsyncClient(timeout=30.0) as client:
+                            resp = await client.request(method, url, content=body, headers=headers)
+                        return {"body": resp.text, "status_code": resp.status_code, "error": None}
+                    except httpx.RequestError as e:
+                        return {"body": None, "status_code": None, "error": str(e)}
+
                 # Replay against App A
                 start_a = datetime.utcnow()
-                resp_a_data = await repeater_client.direct_http_replay(
+                resp_a_data = await _http_replay(
                     app=app_a, path=replay_path, method=method, headers=headers, body=send_body
                 )
                 dur_a = int((datetime.utcnow() - start_a).total_seconds() * 1000)
 
                 # Replay against App B
                 start_b = datetime.utcnow()
-                resp_b_data = await repeater_client.direct_http_replay(
+                resp_b_data = await _http_replay(
                     app=app_b, path=replay_path, method=method, headers=headers, body=send_body
                 )
                 dur_b = int((datetime.utcnow() - start_b).total_seconds() * 1000)
