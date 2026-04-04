@@ -3,7 +3,7 @@ Shared pytest fixtures for API integration tests.
 Each test function gets an isolated SQLite database file.
 """
 import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, AsyncMock
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 from sqlalchemy.pool import NullPool
 
@@ -48,12 +48,10 @@ def client(tmp_path):
     # Patch APScheduler so the singleton doesn't raise across tests.
     # schedule-specific tests that need real APScheduler behaviour should
     # use their own fixture setup.
-    # Also patch SSH executor so tests don't block on real SSH connections.
+    # Also patch SSH executor and arex_client so tests don't block on real connections.
     with patch("main.scheduler") as mock_sched, \
          patch("api.v1.schedule.scheduler") as mock_sched2, \
-         patch("api.v1.sessions.ssh_executor.clear_remote_dir", return_value=0), \
-         patch("api.v1.sessions.ssh_executor.list_remote_files", return_value=[]), \
-         patch("api.v1.sessions.ssh_executor.pull_file_content", return_value=b""):
+         patch("api.v1.sessions.ArexClient") as mock_arex_client:
         mock_sched.running = False
         mock_sched.add_job = MagicMock()
         mock_sched.remove_job = MagicMock()
@@ -62,6 +60,11 @@ def client(tmp_path):
         mock_sched2.add_job = MagicMock()
         mock_sched2.remove_job = MagicMock()
         mock_sched2.get_job = MagicMock(return_value=None)
+        # ArexClient mock: return empty recordings by default
+        mock_arex_instance = AsyncMock()
+        mock_arex_instance.query_recordings.return_value = {"body": {"sources": []}}
+        mock_arex_instance.health_check.return_value = True
+        mock_arex_client.return_value = mock_arex_instance
 
         with TestClient(app, raise_server_exceptions=False) as c:
             yield c
