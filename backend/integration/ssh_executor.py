@@ -5,6 +5,7 @@ All methods are sync (run in thread pool via asyncio.to_thread).
 import io
 import logging
 import os
+import re
 import stat
 import time
 from pathlib import Path
@@ -120,76 +121,6 @@ def run_command(app: Application, command: str, timeout: int = 30) -> tuple[int,
     return exit_code, out, err
 
 
-def list_remote_files(app: Application, remote_dir: str, since_ts: float | None = None) -> list[str]:
-    """List recording files in the remote directory.
-    If since_ts is given (unix timestamp), only return files modified at or after that time.
-    """
-    client = _build_client(app)
-    sftp = client.open_sftp()
-    try:
-        try:
-            attrs = sftp.listdir_attr(remote_dir)
-        except FileNotFoundError:
-            attrs = []
-    finally:
-        sftp.close()
-        client.close()
-    result = []
-    for a in attrs:
-        if a.filename.startswith("."):
-            continue
-        if since_ts is not None and (a.st_mtime or 0) < since_ts:
-            continue
-        result.append(a.filename)
-    return result
-
-
-def pull_file_content(app: Application, remote_path: str) -> bytes:
-    """Read a remote file and return its raw bytes."""
-    client = _build_client(app)
-    sftp = client.open_sftp()
-    with sftp.open(remote_path, "rb") as f:
-        content = f.read()
-    sftp.close()
-    client.close()
-    return content
-
-
-def clear_remote_dir(app: Application, remote_dir: str) -> int:
-    """Delete all non-hidden files in a remote directory. Returns count of deleted files."""
-    client = _build_client(app)
-    sftp = client.open_sftp()
-    deleted = 0
-    try:
-        attrs = sftp.listdir_attr(remote_dir)
-        for a in attrs:
-            if not a.filename.startswith("."):
-                try:
-                    sftp.remove(f"{remote_dir}/{a.filename}")
-                    deleted += 1
-                except Exception:
-                    pass
-    except FileNotFoundError:
-        pass
-    finally:
-        sftp.close()
-        client.close()
-    return deleted
-
-
-def delete_remote_file(app: Application, remote_path: str) -> None:
-    """Delete a single file on the remote host via SFTP."""
-    client = _build_client(app)
-    sftp = client.open_sftp()
-    try:
-        sftp.remove(remote_path)
-    except FileNotFoundError:
-        pass
-    finally:
-        sftp.close()
-        client.close()
-
-
 def _mkdir_p(sftp: paramiko.SFTPClient, remote_dir: str) -> None:
     """Recursively create remote directories."""
     parts = remote_dir.rstrip("/").split("/")
@@ -205,12 +136,112 @@ def _mkdir_p(sftp: paramiko.SFTPClient, remote_dir: str) -> None:
             sftp.mkdir(current)
 
 
-# AREX-specific methods (stub, to be implemented in Task 4)
-async def upload_arex_agent(app, local_agent_jar_path: str):
-    raise NotImplementedError("To be implemented in Task 4")
+# ---------------------------------------------------------------------------
+# AREX agent deployment methods
+# ---------------------------------------------------------------------------
 
-async def inject_javaagent_param(app, arex_storage_url: str, agent_remote_path: str):
-    raise NotImplementedError("To be implemented in Task 4")
+def upload_arex_agent(app: Application, local_agent_jar_path: str) -> None:
+    """Upload arex-agent.jar to the target server.
 
-async def get_javaagent_status(app):
-    raise NotImplementedError("To be implemented in Task 4")
+    Remote path: ~/arex-agent/arex-agent.jar
+    The remote directory is created if it does not exist.
+    """
+    remote_path = "~/arex-agent/arex-agent.jar"
+    # Expand ~ via SSH so we use the absolute path understood by SFTP
+    _, stdout, _ = _build_client(app).exec_command("echo $HOME")
+    # We need a separate connection here; use run_command instead
+    _, home_out, _ = run_command(app, "echo $HOME")
+    home = home_out.strip()
+    remote_abs = f"{home}/arex-agent/arex-agent.jar"
+
+    client = _build_client(app)
+    sftp = client.open_sftp()
+    try:
+        remote_dir = f"{home}/arex-agent"
+        try:
+            sftp.stat(remote_dir)
+        except FileNotFoundError:
+            _mkdir_p(sftp, remote_dir)
+        sftp.put(local_agent_jar_path, remote_abs)
+        logger.info("upload_arex_agent: uploaded %s -> %s", local_agent_jar_path, remote_abs)
+    finally:
+        sftp.close()
+        client.close()
+
+
+def inject_javaagent_param(app: Application, arex_storage_url: str, agent_remote_path: str) -> str:
+    """Inject -javaagent and -Darex.* params into the target JVM startup script.
+
+    Returns one of:
+      "OK: injected into {script_path}"
+      "ALREADY_INJECTED"
+      "NOT_FOUND: no startup script found at ~/start.sh or ~/bin/start.sh"
+    """
+    # Step 1: find the startup script
+    _, out1, _ = run_command(
+        app,
+        'find ~ -maxdepth 3 -name "start.sh" -o -name "startup.sh" 2>/dev/null | head -1',
+    )
+    script_path = out1.strip()
+
+    if not script_path:
+        _, out2, _ = run_command(
+            app,
+            'ls ~/bin/start.sh ~/start.sh 2>/dev/null | head -1',
+        )
+        script_path = out2.strip()
+
+    if not script_path:
+        return "NOT_FOUND: no startup script found at ~/start.sh or ~/bin/start.sh"
+
+    # Step 3: read the script content
+    _, script_content, _ = run_command(app, f"cat {script_path}")
+
+    # Step 4: check if already injected
+    if "-javaagent" in script_content:
+        return "ALREADY_INJECTED"
+
+    # Step 5: build javaagent string
+    # Strip scheme (http:// or https://) from arex_storage_url
+    storage_netloc = re.sub(r'^https?://', '', arex_storage_url).rstrip('/')
+    if ':' in storage_netloc:
+        storage_host, storage_port = storage_netloc.rsplit(':', 1)
+    else:
+        storage_host = storage_netloc
+        storage_port = "8080"
+
+    javaagent_param = (
+        f"-javaagent:{agent_remote_path}"
+        f" -Darex.service.name={app.name}"
+        f" -Darex.storage.service.host={storage_host}:{storage_port}"
+    )
+
+    # Step 6: inject into the java command line via sed
+    # Escape special characters for sed replacement string
+    escaped_param = javaagent_param.replace('\\', '\\\\').replace('/', '\\/').replace('&', '\\&')
+    sed_cmd = f"sed -i 's/java /java {escaped_param} /' {script_path}"
+    exit_code, _, sed_err = run_command(app, sed_cmd)
+    if exit_code != 0:
+        logger.warning("inject_javaagent_param: sed failed (exit %d): %s", exit_code, sed_err)
+
+    return f"OK: injected into {script_path}"
+
+
+def get_javaagent_status(app: Application) -> dict:
+    """Check if arex-agent is currently running in the target JVM.
+
+    Returns a dict with keys: status, pid, arex_agent, and optionally cmdline.
+    """
+    pid = discover_pid(app)
+    if pid is None:
+        return {"status": "NOT_RUNNING", "pid": None, "arex_agent": False}
+
+    _, cmdline_out, _ = run_command(app, f"cat /proc/{pid}/cmdline | tr '\\0' ' '")
+    arex_present = "arex-agent" in cmdline_out
+
+    return {
+        "status": "RUNNING",
+        "pid": pid,
+        "arex_agent": arex_present,
+        "cmdline": cmdline_out[:200],
+    }
